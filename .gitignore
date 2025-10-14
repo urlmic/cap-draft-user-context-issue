@@ -1,0 +1,6 @@
+node_modules/
+package-lock.json
+*.log
+.DS_Store
+POSTING-INSTRUCTIONS.md
+SAP-COMMUNITY-POST.md
