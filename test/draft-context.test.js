@@ -19,15 +19,32 @@ describe('Draft User Context Issue', () => {
     draftID = data.ID;
   });
 
-  test('Query draft programmatically (loses user context)', async () => {
+  test('Query draft programmatically - Option 1: Create user context', async () => {
     const srv = await cds.connect.to('CatalogService');
     const { Books } = srv.entities;
 
-    // This query fails because it uses 'anonymous' user instead of 'alice'
-    const draft = await srv.run(SELECT.from(Books.drafts).where({ ID: draftID }));
+    // Option 1: Create a transaction with user context
+    const draft = await srv.tx({ user: new cds.User.Privileged({ id: 'alice' }) }, async (tx) => {
+      return tx.run(SELECT.from(Books.drafts).where({ ID: draftID }));
+    });
 
-    console.log('Draft found:', draft);
-    expect(draft).toBeDefined(); // This will fail!
+    console.log('Draft found (with user context):', draft);
+    expect(draft).toBeDefined();
+    expect(draft.length).toBe(1);
+  });
+
+  test('Query draft programmatically - Option 2: Use database layer', async () => {
+    const srv = await cds.connect.to('CatalogService');
+    const { Books } = srv.entities;
+
+    // Option 2: Access drafts directly via database layer (bypasses service-level user filtering)
+    // Use service entity for reflection, but query against cds.db
+    const draft = await cds.db.run(
+      SELECT.from(Books.drafts).where({ ID: draftID })
+    );
+    
+    console.log('Draft found (via db layer):', draft);
+    expect(draft).toBeDefined();
     expect(draft.length).toBe(1);
   });
 

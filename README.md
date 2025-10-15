@@ -1,4 +1,4 @@
-# Draft User Context Issue Reproduction
+# CAP Draft User Context - Understanding and Solutions
 
 ## 🚀 Quick Start
 
@@ -11,66 +11,117 @@ npm test
 
 **Expected Output:**
 - ✅ Test 1: Create draft via OData (passes)
-- ❌ Test 2: Query draft programmatically (fails - returns empty array)
-- ✅ Test 3: Query draft via OData (passes)
+- ✅ Test 2: Query draft with user context (passes)
+- ✅ Test 3: Query draft via database layer (passes)
+- ✅ Test 4: Query draft via OData (passes)
 
 ---
 
-## Problem Description
+## Understanding Draft User Context in SAP CAP
 
-When creating drafts via authenticated OData requests, subsequent programmatic queries using `srv.run()` fail to find those drafts. The root cause is that `srv.run()` defaults to `'anonymous'` user context instead of preserving the authenticated user.
+**Key Insight:** Draft filtering by user is **by design**, not a bug. The service layer automatically filters drafts by the current user for security - users can only see their own drafts (intended for Fiori UI usage).
 
-## Expected Behavior
+### The Behavior
 
-When user 'alice' creates a draft via POST and then queries it programmatically:
-- The programmatic query should find the draft created by 'alice'
-- Both OData and programmatic queries should use the same user context
+When querying drafts via the **service layer** (`srv.run()`), CAP automatically adds:
+```sql
+WHERE ... AND DraftAdministrativeData.InProcessByUser = '<current-user>'
+```
 
-## Actual Behavior
+In programmatic/test contexts with no HTTP request, there's **no user context**, so it defaults to `'anonymous'`.
 
-- OData POST creates draft with `DraftAdministrativeData.InProcessByUser = 'alice'`
-- Programmatic `srv.run()` query uses `InProcessByUser = 'anonymous'`
-- Query returns empty result despite draft existing
+---
+
+## 💡 Solutions
+
+### Option 1: Create User Context (Recommended for Business Logic)
+
+When you need to query drafts in service handlers or business logic, create a transaction with user context:
+
+```javascript
+const srv = await cds.connect.to('CatalogService');
+const { Books } = srv.entities;
+
+// Create transaction with specific user
+const draft = await srv.tx({ user: new cds.User.Privileged({ id: 'alice' }) }, async (tx) => {
+  return tx.run(SELECT.from(Books.drafts).where({ ID: draftID }));
+});
+```
+
+**Use Case:** Service handlers, business logic where you need service-level authorization checks.
+
+### Option 2: Use Database Layer (Access All Drafts)
+
+For administrative tasks or tests where you need to access all drafts regardless of user:
+
+```javascript
+const srv = await cds.connect.to('CatalogService');
+const { Books } = srv.entities;
+
+// Query directly via database (bypasses service-level user filtering)
+// Use service entity for reflection, but query against cds.db
+const drafts = await cds.db.run(SELECT.from(Books.drafts).where({ ID: draftID }));
+```
+
+**Use Case:** Admin operations, tests, background jobs, cross-user draft queries.
+
+**Important:** Use service entity reflection (`srv.entities`) to get the correct entity reference, but execute the query against `cds.db` to bypass user filtering.
+
+---
+
+## ⚠️ Important Security Note
+
+The service layer's user-based draft filtering is a **security feature**:
+- Prevents users from seeing/modifying other users' drafts
+- Aligns with Fiori UI expectations
+- Enforces data isolation
+
+Only bypass via `cds.db` when you have a legitimate reason (admin, testing, etc.).
 
 ## SQL Evidence
 
-With `cds.env.log.sql = true`, you can see:
+With `cds.env.log.sql = true`, you can observe the behavior:
 
-**Draft Creation (works):**
+**Draft Creation via OData:**
 ```sql
 INSERT INTO my_bookshop_Books_drafts (...) VALUES (...)
-INSERT INTO my_bookshop_Books_drafts_DraftAdministrativeData (InProcessByUser, ...) VALUES ('alice', ...)
+INSERT INTO my_bookshop_Books_drafts_DraftAdministrativeData 
+  (InProcessByUser, ...) VALUES ('alice', ...)
 ```
 
-**OData Query (works):**
+**Query via Service Layer (with user context):**
 ```sql
-SELECT ... FROM my_bookshop_Books_drafts WHERE ID = ? AND DraftAdministrativeData.InProcessByUser = 'alice'
+SELECT ... FROM my_bookshop_Books_drafts 
+WHERE ID = ? AND DraftAdministrativeData.InProcessByUser = 'alice'
 ```
 
-**Programmatic Query (fails):**
+**Query via Database Layer (no user filter):**
 ```sql
-SELECT ... FROM my_bookshop_Books_drafts WHERE ID = ? AND DraftAdministrativeData.InProcessByUser = 'anonymous'
+SELECT ... FROM my_bookshop_Books_drafts WHERE ID = ?
+-- No InProcessByUser filter applied
 ```
 
-## The Question
+---
 
-**How do I maintain user context when making programmatic draft queries in SAP CAP?**
+## 🎯 When to Use Each Approach
 
-The draft was created by user 'alice' via an authenticated OData request. When I query for it programmatically using `srv.run(SELECT.from(Books.drafts))`, CAP filters by `InProcessByUser = 'anonymous'` instead of 'alice', so the query returns no results.
+| Scenario | Use | Reason |
+|----------|-----|--------|
+| Service handler with `req.user` | `req.tx.run()` | Already has user context from HTTP request |
+| Background job/cron | `cds.db.run()` | No user context available |
+| Admin operations | `cds.db.run()` | Need to access all drafts |
+| Testing | Either approach | Depends on what you're testing |
+| Cross-user queries | `cds.db.run()` | Service layer filters by user |
 
-I've tried:
-- Using `srv.run()` directly
-- Creating a transaction with `srv.tx()`
-- Using `srv.tx({ user: new cds.User.Privileged() })`
-
-None preserve the user context from the original HTTP request. What's the correct pattern?
+---
 
 ## Test Results
 
-Run `npm test` to see:
+Run `npm test` to see both approaches working:
 - ✅ Test 1: Create draft via OData (passes)
-- ❌ Test 2: Query draft programmatically (fails - returns empty array)
-- ✅ Test 3: Query draft via OData (passes)
+- ✅ Test 2: Query draft with user context (passes)
+- ✅ Test 3: Query draft via database layer (passes)
+- ✅ Test 4: Query draft via OData (passes)
 
 ---
 
@@ -83,7 +134,7 @@ Run `npm test` to see:
 ├── srv/
 │   └── catalog-service.cds # Draft-enabled CatalogService
 ├── test/
-│   └── draft-context.test.js # Test demonstrating the issue
+│   └── draft-context.test.js # Demonstrates both approaches
 ├── package.json
 ├── jest.config.js
 └── README.md
@@ -91,8 +142,19 @@ Run `npm test` to see:
 
 ---
 
+## 🎯 Key Takeaways
+
+This repository demonstrates the correct patterns for querying drafts programmatically in SAP CAP.
+
+**Remember:** Draft user filtering is a security feature, not a bug. Choose the right approach:
+- **Service layer (`srv.tx()` with user):** When you have/need user context and authorization
+- **Database layer (`cds.db`):** When you need all drafts or have no user context
+
+---
+
 ## Environment
 
 - @sap/cds: ^9
 - Node.js: v18+
+- Test framework: Jest with @cap-js/cds-test
 - Test framework: Jest with @cap-js/cds-test
